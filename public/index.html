@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Relay Bridge moves USDC from Base to Arbitrum in one flow — live Relay quote, wallet-signed steps, tracked to success with a saved receipt." />
+<title>Relay Bridge — USDC from Base to Arbitrum, in one flow</title>
+<style>
+  :root { --bg:#fbfcfb; --raised:#ffffff; --ink:#101613; --ink-2:#3d4741; --ink-3:#68736c; --line:#dde3df; --accent:#1d4ed8; --accent-2:#0f766e; --good:#15803d; --bad:#b91c1c; --warn-bg:#fef3c7; --warn-ink:#92400e; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--ink); line-height:1.5; }
+  .wrap { max-width:680px; margin:0 auto; padding:24px 16px 64px; }
+  header { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:20px; }
+  .brand { font-weight:800; font-size:20px; }
+  .route { color:var(--ink-3); font-size:13px; letter-spacing:.08em; text-transform:uppercase; }
+  .card { background:var(--raised); border:1px solid var(--line); border-radius:16px; padding:20px; margin-bottom:16px; }
+  h1 { font-size:28px; line-height:1.2; margin:0 0 8px; }
+  p.lede { color:var(--ink-2); margin:0 0 16px; }
+  label { display:block; font-size:13px; font-weight:600; color:var(--ink-2); margin:12px 0 6px; }
+  input[type="text"], input[type="number"] { width:100%; padding:12px; font-size:18px; border:1px solid var(--line); border-radius:10px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; margin-top:16px; }
+  button { cursor:pointer; border:0; border-radius:10px; padding:12px 18px; font-size:16px; font-weight:700; }
+  .btn-primary { background:var(--accent); color:#fff; flex:1; }
+  .btn-secondary { background:#eef2ff; color:var(--accent); }
+  button:disabled { opacity:.55; cursor:not-allowed; }
+  .note { background:var(--warn-bg); color:var(--warn-ink); border-radius:10px; padding:12px; font-size:14px; margin-bottom:16px; }
+  .ok { color:var(--good); font-weight:700; }
+  .err { color:var(--bad); font-weight:700; }
+  .quote { font-size:18px; }
+  .quote b { font-size:26px; }
+  .muted { color:var(--ink-3); font-size:14px; }
+  .steps { font-size:14px; white-space:pre-wrap; }
+  .receipt { border-top:1px solid var(--line); padding-top:12px; margin-top:12px; font-size:14px; }
+  a { color:var(--accent); }
+  footer { color:var(--ink-3); font-size:13px; margin-top:24px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">Relay Bridge</div>
+    <div class="route">Base &rarr; Arbitrum</div>
+  </header>
+
+  <div class="card">
+    <h1>Bridge USDC from Base to Arbitrum, in one flow</h1>
+    <p class="lede">Live Relay quote, wallet-signed steps, tracked to success with a saved receipt. You always confirm each step in your own wallet — nothing is spent or signed without you approving it there.</p>
+
+    <div id="wallet-note" class="note" hidden></div>
+
+    <div class="row">
+      <button id="connect-btn" class="btn-secondary" type="button">Connect wallet</button>
+      <span id="wallet-status" class="muted" style="align-self:center">Not connected</span>
+    </div>
+
+    <label for="amount">You send (USDC on Base)</label>
+    <input id="amount" type="number" value="1" min="0" step="0.01" inputmode="decimal" />
+
+    <label for="address">Your wallet address (for the quote)</label>
+    <input id="address" type="text" placeholder="0x…" autocomplete="off" />
+
+    <div class="row">
+      <button id="quote-btn" class="btn-primary" type="button">Get quote</button>
+    </div>
+
+    <div id="quote-out" style="margin-top:16px"></div>
+    <div id="status-out" class="steps" style="margin-top:12px"></div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin:0 0 8px;font-size:18px">Receipts</h2>
+    <p class="muted" style="margin:0">Saved on this device only (localStorage).</p>
+    <div id="receipts"></div>
+  </div>
+
+  <footer>
+    Powered by Relay. USDC on Base (chain 8453) to USDC on Arbitrum One (chain 42161).
+    This page never holds your Relay API key — quotes go through this site's own server.
+  </footer>
+</div>
+
+<script>
+const BASE_CHAIN_ID = 8453;
+const BASE_HEX = '0x2105';
+const USDC_DECIMALS = 6;
+
+let account = null;
+let currentQuote = null;
+let polling = false;
+
+const $ = (id) => document.getElementById(id);
+const fmt = (atomic) => {
+  if (atomic == null) return '—';
+  const n = Number(atomic) / 10 ** USDC_DECIMALS;
+  return Number.isFinite(n) ? n.toFixed(6).replace(/0+$/, '').replace(/\.$/, '') : '—';
+};
+function showNote(msg) {
+  const el = $('wallet-note');
+  if (!msg) { el.hidden = true; el.textContent = ''; return; }
+  el.hidden = false; el.textContent = msg;
+}
+function setStatus(msg, isError) {
+  const el = $('status-out');
+  el.innerHTML = msg ? `<span class="${isError ? 'err' : ''}">${msg}</span>` : '';
+}
+
+function renderReceipts() {
+  const list = JSON.parse(localStorage.getItem('relay-bridge-receipts') || '[]');
+  $('receipts').innerHTML = list.length ? list.map((r) => `
+    <div class="receipt">
+      <b>${r.amount} USDC</b> Base &rarr; Arbitrum &middot; ${r.status || ''} &middot; ${r.time || ''}<br/>
+      ${r.requestId ? `Request: ${r.requestId}<br/>` : ''}
+      ${r.txHash ? `Deposit tx: <a href="https://basescan.org/tx/${r.txHash}" target="_blank" rel="noopener">Basescan</a><br/>` : ''}
+      ${r.destTxHash ? `Arrival tx: <a href="https://arbiscan.io/tx/${r.destTxHash}" target="_blank" rel="noopener">Arbiscan</a>` : ''}
+    </div>`).join('') : '<p class="muted">No bridges yet.</p>';
+}
+function saveReceipt(r) {
+  const list = JSON.parse(localStorage.getItem('relay-bridge-receipts') || '[]');
+  list.unshift({ ...r, time: new Date().toLocaleString() });
+  localStorage.setItem('relay-bridge-receipts', JSON.stringify(list.slice(0, 20)));
+  renderReceipts();
+}
+
+async function connectWallet() {
+  if (!window.ethereum) {
+    showNote('No wallet found in this browser. Open this page in a wallet browser (MetaMask, Coinbase Wallet, Rabby) to execute — quotes still work below if you paste your address.');
+    return;
+  }
+  try {
+    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+    account = accounts[0];
+    $('address').value = account;
+    $('wallet-status').textContent = account.slice(0, 6) + '…' + account.slice(-4);
+    showNote('');
+    // Switch to Base if needed.
+    const chainId = await window.ethereum.request({ method: 'eth_chainId' });
+    if (parseInt(chainId, 16) !== BASE_CHAIN_ID) {
+      try {
+        await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: BASE_HEX }] });
+      } catch (e) {
+        if (e.code === 4902) {
+          await window.ethereum.request({ method: 'wallet_addEthereumChain', params: [{ chainId: BASE_HEX, chainName: 'Base', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: ['https://mainnet.base.org'], blockExplorerUrls: ['https://basescan.org'] }] });
+        } else { throw e; }
+      }
+    }
+  } catch (e) {
+    setStatus('Wallet connection was not completed: ' + (e.message || e), true);
+  }
+}
+
+async function getQuote() {
+  const user = ($('address').value || '').trim();
+  const amount = $('amount').value;
+  if (!user || !/^0x[0-9a-fA-F]{40}$/.test(user)) {
+    setStatus('Enter your wallet address (0x…) first, or connect your wallet above.', true);
+    return;
+  }
+  $('quote-btn').disabled = true;
+  setStatus('Getting a live quote from Relay…');
+  $('quote-out').innerHTML = '';
+  try {
+    const r = await fetch('/api/quote', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user, amountUsdc: amount }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || ('Quote failed (HTTP ' + r.status + ')'));
+    currentQuote = data;
+    const out = data.details && data.details.currencyOut ? fmt(data.details.currencyOut.amount) : '—';
+    const fees = data.details && data.details.totalImpact ? data.details.totalImpact : null;
+    const feeText = fees && fees.usd ? `Fee: about $${Number(fees.usd).toFixed(4)}` : (data.details && data.details.fees ? `Fees: ${JSON.stringify(data.details.fees)}` : 'Fee shown in your wallet when you confirm.');
+    $('quote-out').innerHTML = `
+      <div class="quote">You receive about <b>${out} USDC</b> on Arbitrum</div>
+      <p class="muted">${feeText}</p>
+      <div class="row"><button id="execute-btn" class="btn-primary" type="button">Execute bridge</button></div>
+      <p class="muted">You will confirm each step in your wallet. Nothing is signed until you approve it there.</p>`;
+    setStatus('');
+    $('execute-btn').addEventListener('click', executeBridge);
+  } catch (e) {
+    setStatus('Quote failed: ' + e.message, true);
+  } finally {
+    $('quote-btn').disabled = false;
+  }
+}
+
+async function executeBridge() {
+  if (!window.ethereum) {
+    setStatus('No wallet found in this browser. Open this page in a wallet browser (MetaMask, Coinbase Wallet, Rabby) to execute.', true);
+    return;
+  }
+  if (!currentQuote || !currentQuote.steps) {
+    setStatus('Get a fresh quote first.', true);
+    return;
+  }
+  if (!account) await connectWallet();
+  if (!account) { setStatus('Connect your wallet first.', true); return; }
+
+  const btn = $('execute-btn');
+  if (btn) btn.disabled = true;
+  let requestId = currentQuote.requestId || (currentQuote.details && currentQuote.details.requestId) || null;
+  let lastTxHash = null;
+  try {
+    for (const step of currentQuote.steps) {
+      for (const item of (step.items || [])) {
+        const d = item.data || {};
+        // Signature steps are not supported in this public version — say so plainly.
+        if (d.signatureKind || step.kind === 'signature' || item.kind === 'signature') {
+          setStatus('This quote needs a signature step, which is not supported in this public version. No transaction was sent. Please try again or use relay.link/bridge.', true);
+          if (btn) btn.disabled = false;
+          return;
+        }
+        if (!d.to) continue; // nothing to send for this item
+        setStatus('Waiting for you to confirm the next step in your wallet…');
+        const txHash = await window.ethereum.request({
+          method: 'eth_sendTransaction',
+          params: [{ from: account, to: d.to, data: d.data || '0x', value: d.value || '0x0', chainId: d.chainId ? '0x' + Number(d.chainId).toString(16) : BASE_HEX }],
+        });
+        lastTxHash = txHash;
+        setStatus('Transaction sent: ' + txHash + ' — waiting for Relay to fill it…');
+      }
+    }
+    if (!requestId) {
+      setStatus('Steps were sent, but Relay did not return a requestId, so the fill cannot be tracked here. Check Basescan for your transaction.', true);
+      return;
+    }
+    saveReceipt({ amount: $('amount').value, status: 'submitted', requestId, txHash: lastTxHash });
+    await pollStatus(requestId, lastTxHash);
+  } catch (e) {
+    setStatus('Bridge was not completed: ' + (e.message || e) + '. Nothing further was sent after the step you declined.', true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function pollStatus(requestId, txHash) {
+  polling = true;
+  const started = Date.now();
+  while (polling && Date.now() - started < 10 * 60 * 1000) {
+    try {
+      const r = await fetch('/api/status', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestId }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || ('Status check failed (HTTP ' + r.status + ')'));
+      const s = data.status || (data.details && data.details.status) || JSON.stringify(data);
+      const destTx = data.txHashes && data.txHashes.length ? data.txHashes[data.txHashes.length - 1].txHash : null;
+      if (s === 'success') {
+        setStatus('');
+        $('quote-out').innerHTML += `<p class="ok">Bridge complete — USDC arrived on Arbitrum.</p>
+          ${txHash ? `<p><a href="https://basescan.org/tx/${txHash}" target="_blank" rel="noopener">View deposit on Basescan</a></p>` : ''}
+          ${destTx ? `<p><a href="https://arbiscan.io/tx/${destTx}" target="_blank" rel="noopener">View arrival on Arbiscan</a></p>` : ''}`;
+        saveReceipt({ amount: $('amount').value, status: 'success', requestId, txHash, destTxHash: destTx });
+        return;
+      }
+      if (s === 'refund') {
+        setStatus('Relay refunded this bridge. Check Basescan for the refund transaction.', true);
+        saveReceipt({ amount: $('amount').value, status: 'refund', requestId, txHash });
+        return;
+      }
+      setStatus('Relay status: ' + s + ' — still waiting…');
+    } catch (e) {
+      setStatus('Status check failed: ' + e.message + ' — retrying…', true);
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  if (polling) setStatus('Still waiting after 10 minutes. Check Basescan / Arbiscan with your transaction hash, or try again later.', true);
+}
+
+$('connect-btn').addEventListener('click', connectWallet);
+$('quote-btn').addEventListener('click', getQuote);
+if (window.ethereum) {
+  window.ethereum.on && window.ethereum.on('accountsChanged', (accs) => {
+    account = accs[0] || null;
+    $('address').value = account || '';
+    $('wallet-status').textContent = account ? account.slice(0, 6) + '…' + account.slice(-4) : 'Not connected';
+  });
+} else {
+  showNote('No wallet found in this browser. Open this page in a wallet browser (MetaMask, Coinbase Wallet, Rabby) to execute — quotes still work below if you paste your address.');
+}
+renderReceipts();
+</script>
+</body>
+</html>
